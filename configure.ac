@@ -444,7 +444,7 @@ intel)
     COMP_VENDOR_LDFLAGS=
     ;;
 clang*)
-    COMP_VENDOR_CFLAGS="-D_XOPEN_SOURCE=700 -std=c99 -Wall -Wunused-variable -Wwrite-strings -Wstrict-prototypes -Wmissing-prototypes $COMP_VENDOR_CFLAGS"
+    COMP_VENDOR_CFLAGS="-D_XOPEN_SOURCE=700 -std=gnu99 -Wall -Wunused-variable -Wwrite-strings -Wstrict-prototypes -Wmissing-prototypes $COMP_VENDOR_CFLAGS"
     if test x"$ac_cv_gcc_unused_but_set_variable" = xyes ; then
         COMP_VENDOR_CFLAGS="-Wunused-but-set-variable $COMP_VENDOR_CFLAGS"
     fi

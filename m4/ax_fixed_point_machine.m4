@@ -16,7 +16,7 @@ AC_CACHE_CHECK([if $1 is fixed point only], ac_FixedPoint,
 [case $1 in
       arc \
     | arm | arm[bl]e | arme[bl] | armv[2345] | armv[345][bl] \
-    | arm-*  | arm[bl]e-* | arme[bl]-* | armv[345]-* \
+    | arm[bl]e-* | arme[bl]-* | armv[345]-* \
     | bfin | bfin-* \
     | mips | mipsbe | mipseb | mipsel | mipsle \
     | mips-* | mipsbe-* | mipseb-* | mipsel-* | mipsle-* \
