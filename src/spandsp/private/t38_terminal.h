@@ -95,6 +95,21 @@ typedef struct
     span_sample_timer_t timeout_tx_samples;
     /*! \brief The current receive timeout. */
     span_sample_timer_t timeout_rx_samples;
+
+    /*! \brief V.8 negotiation state. */
+    int v8_state;
+    /*! \brief True if V.8 ANSam was received. */
+    bool v8_ansam_received;
+    /*! \brief JM message data from V.8 negotiation. */
+    uint8_t v8_jm_data[100];
+    /*! \brief Length of JM data. */
+    int v8_jm_len;
+    /*! \brief True if JM was received successfully. */
+    bool v8_jm_received;
+    /*! \brief V.34 mode active. */
+    bool v34_active;
+    /*! \brief V.34 rate stored from V34Rate IFP. */
+    int v34_rate;
 } t38_terminal_front_end_state_t;
 
 /*!

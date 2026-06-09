@@ -132,7 +132,21 @@ enum
     T38_TIMED_STEP_CNG = 0x40,
     T38_TIMED_STEP_CNG_2 = 0x41,
     T38_TIMED_STEP_PAUSE = 0x50,
-    T38_TIMED_STEP_NO_SIGNAL = 0x60
+    T38_TIMED_STEP_NO_SIGNAL = 0x60,
+    T38_TIMED_STEP_V8_CM_SEND = 0x70,
+    T38_TIMED_STEP_V8_WAIT_JM = 0x71,
+    T38_TIMED_STEP_V8_CJ_SEND = 0x72,
+    T38_TIMED_STEP_V8_DONE = 0x73,
+    T38_TIMED_STEP_V34_DATA = 0x80
+};
+
+enum
+{
+    V8_STATE_IDLE = 0,
+    V8_STATE_CM_SEND,
+    V8_STATE_WAIT_JM,
+    V8_STATE_CJ_SEND,
+    V8_STATE_DONE
 };
 
 static __inline__ int front_end_status(t38_terminal_state_t *s, int status)
@@ -260,6 +274,16 @@ static int process_rx_indicator(t38_core_state_t *t, void *user_data, int indica
         front_end_status(s, T30_FRONT_END_CED_PRESENT);
         break;
     case T38_IND_V34_CNTL_CHANNEL_1200:
+        if (fe->v8_ansam_received)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW, "V.34 control channel started\n");
+            fe->v34_active = true;
+            fe->current_rx_type = T30_MODEM_V34HDX;
+        }
+        /*endif*/
+        fe->timeout_rx_samples = fe->samples + milliseconds_to_samples(MID_RX_TIMEOUT);
+        front_end_status(s, T30_FRONT_END_SIGNAL_PRESENT);
+        break;
     case T38_IND_V21_PREAMBLE:
         fe->timeout_rx_samples = fe->samples + milliseconds_to_samples(MID_RX_TIMEOUT);
         front_end_status(s, T30_FRONT_END_SIGNAL_PRESENT);
@@ -285,9 +309,29 @@ static int process_rx_indicator(t38_core_state_t *t, void *user_data, int indica
         front_end_status(s, T30_FRONT_END_SIGNAL_PRESENT);
         break;
     case T38_IND_V8_ANSAM:
+        if ((s->t30.supported_modems & T30_SUPPORT_V34HDX))
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW, "V.8 ANSam detected, enabling V.34 negotiation\n");
+            fe->v8_ansam_received = true;
+            fe->v8_state = V8_STATE_CM_SEND;
+            fe->current_rx_type = T30_MODEM_V34HDX;
+            front_end_status(s, T30_FRONT_END_SIGNAL_PRESENT);
+        }
+        /*endif*/
+        break;
     case T38_IND_V8_SIGNAL:
+        if (fe->v8_ansam_received)
+        {
+            front_end_status(s, T30_FRONT_END_SIGNAL_PRESENT);
+        }
+        /*endif*/
+        break;
     case T38_IND_V34_CC_RETRAIN:
-        /* V.34 support is a work in progress. */
+        if (fe->v34_active)
+        {
+            front_end_status(s, T30_FRONT_END_SIGNAL_PRESENT);
+        }
+        /*endif*/
         break;
     default:
         front_end_status(s, T30_FRONT_END_SIGNAL_ABSENT);
@@ -359,12 +403,21 @@ static int process_rx_data(t38_core_state_t *t, void *user_data, int data_type, 
             //front_end_status(s, T30_FRONT_END_RECEIVE_COMPLETE);
             break;
         case T38_FIELD_JM_MESSAGE:
-            if (len >= 2)
-                span_log(&s->logging, SPAN_LOG_FLOW, "JM - %s\n", t38_jm_to_str(buf, len));
+            if (len >= 2  &&  len < (int) sizeof(fe->v8_jm_data))
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW, "V.8 JM - %s\n", t38_jm_to_str(buf, len));
+                memcpy(fe->v8_jm_data, buf, len);
+                fe->v8_jm_len = len;
+                fe->v8_jm_received = true;
+                if (fe->v8_state == V8_STATE_WAIT_JM)
+                    fe->v8_state = V8_STATE_CJ_SEND;
+                /*endif*/
+            }
             else
+            {
                 span_log(&s->logging, SPAN_LOG_FLOW, "Bad length for JM message - %d\n", len);
+            }
             /*endif*/
-            //front_end_status(s, T30_FRONT_END_RECEIVE_COMPLETE);
             break;
         case T38_FIELD_CI_MESSAGE:
             if (len >= 1)
@@ -388,6 +441,7 @@ static int process_rx_data(t38_core_state_t *t, void *user_data, int data_type, 
                 /* Just get and store the rate. The front end has no real interest in the
                    actual bit rate. */
                 fe->t38.v34_rate = t38_v34rate_to_bps(buf, len);
+                fe->v34_rate = fe->t38.v34_rate;
                 span_log(&s->logging, SPAN_LOG_FLOW, "V.34 rate %d bps\n", fe->t38.v34_rate);
             }
             else
@@ -1180,6 +1234,56 @@ SPAN_DECLARE(int) t38_terminal_send_timeout(t38_terminal_state_t *s, int samples
     delay = 0;
     switch ((fe->timed_step & 0xFFF0))
     {
+    case T38_TIMED_STEP_V8_CM_SEND:
+        /* Send V.8 Call Menu */
+        {
+            uint8_t cm = '0';
+            span_log(&s->logging, SPAN_LOG_FLOW, "Sending V.8 CM\n");
+            t38_core_send_data(&fe->t38, T38_DATA_V8, T38_FIELD_CM_MESSAGE, &cm, 1, INDICATOR_TX_COUNT);
+            fe->next_tx_samples = fe->samples + milliseconds_to_samples(100);
+            fe->timed_step = T38_TIMED_STEP_V8_WAIT_JM;
+            fe->v8_state = V8_STATE_WAIT_JM;
+        }
+        break;
+    case T38_TIMED_STEP_V8_WAIT_JM:
+        /* Wait for JM response */
+        delay = 20000;
+        if (fe->v8_state >= V8_STATE_CJ_SEND)
+        {
+            fe->timed_step = T38_TIMED_STEP_V8_CJ_SEND;
+            delay = 0;
+        }
+        /*endif*/
+        break;
+    case T38_TIMED_STEP_V8_CJ_SEND:
+        /* Send CJ acknowledgment */
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW, "Sending V.8 CJ\n");
+            t38_core_send_data(&fe->t38, T38_DATA_V8, T38_FIELD_CI_MESSAGE, NULL, 0, DATA_TX_COUNT);
+            fe->next_tx_samples = fe->samples + milliseconds_to_samples(100);
+            fe->timed_step = T38_TIMED_STEP_V8_DONE;
+            fe->v8_state = V8_STATE_DONE;
+        }
+        break;
+    case T38_TIMED_STEP_V8_DONE:
+        /* V.8 complete, signal T.30 to continue */
+        fe->timed_step = T38_TIMED_STEP_NONE;
+        front_end_status(s, T30_FRONT_END_SEND_STEP_COMPLETE);
+        break;
+    case T38_TIMED_STEP_V34_DATA:
+        /* V.34 primary channel data - redirect to HDLC streaming step */
+        if (fe->v8_ansam_received  &&  fe->v34_active)
+        {
+            fe->timed_step = T38_TIMED_STEP_HDLC_MODEM;
+            fe->next_tx_samples = fe->samples;
+        }
+        else
+        {
+            fe->timed_step = T38_TIMED_STEP_NONE;
+            front_end_status(s, T30_FRONT_END_SEND_STEP_COMPLETE);
+        }
+        /*endif*/
+        break;
     case T38_TIMED_STEP_NON_ECM_MODEM:
         delay = stream_non_ecm(s);
         break;
@@ -1339,7 +1443,41 @@ static void set_tx_type(void *user_data, int type, int bit_rate, int short_train
         /*endswitch*/
         start_tx(fe, use_hdlc);
         break;
+    case T30_MODEM_V34HDX:
+        if (fe->v8_ansam_received  &&  fe->v8_state == V8_STATE_DONE)
+        {
+            /* V.8 complete, now in V.34 mode. Use V.34 data instead of V.17 training. */
+            fe->next_tx_indicator = T38_IND_V34_PRI_CHANNEL;
+            fe->current_tx_data_type = T38_DATA_V34_PRI_CH;
+            fe->timed_step = T38_TIMED_STEP_V34_DATA;
+        }
+        else if (fe->v8_ansam_received  &&  fe->v8_state < V8_STATE_DONE)
+        {
+            /* Don't start V.34 data yet. We are in V.8 negotiation. */
+            span_log(&s->logging, SPAN_LOG_FLOW, "Deferring V.34 start, V.8 in progress (state %d)\n", fe->v8_state);
+        }
+        else
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW, "V.34 requested but V.8 not started\n");
+        }
+        /*endif*/
+        break;
     case T30_MODEM_V17:
+        /* If V.34 is available and V.8 ANSam was seen, redirect to V.34 path */
+        if (fe->v8_ansam_received
+            &&
+            (s->t30.supported_modems & T30_SUPPORT_V34HDX)
+            &&
+            (fe->v8_state == V8_STATE_DONE))
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW, "Redirect V.17 to V.34 (%d bps)\n", bit_rate);
+            fe->next_tx_indicator = T38_IND_V34_PRI_CHANNEL;
+            fe->current_tx_data_type = T38_DATA_V34_PRI_CH;
+            fe->timed_step = T38_TIMED_STEP_V34_DATA;
+            set_octets_per_data_packet(s, 28800);
+            break;
+        }
+        /*endif*/
         switch (bit_rate)
         {
         case 7200:
@@ -1565,7 +1703,7 @@ SPAN_DECLARE(t38_terminal_state_t *) t38_terminal_init(t38_terminal_state_t *s,
              (void *) s);
     t30_set_iaf_mode(&s->t30, s->t38_fe.t38.iaf);
     t30_set_supported_modems(&s->t30,
-                             T30_SUPPORT_V27TER | T30_SUPPORT_V29 | T30_SUPPORT_V17 | T30_SUPPORT_IAF);
+                             T30_SUPPORT_V27TER | T30_SUPPORT_V29 | T30_SUPPORT_V17 | T30_SUPPORT_V34HDX | T30_SUPPORT_IAF);
     t30_restart(&s->t30, calling_party);
     return s;
 }
