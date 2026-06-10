@@ -134,10 +134,9 @@ enum
     T38_TIMED_STEP_PAUSE = 0x50,
     T38_TIMED_STEP_NO_SIGNAL = 0x60,
     T38_TIMED_STEP_V8_CM_SEND = 0x70,
-    T38_TIMED_STEP_V8_WAIT_JM = 0x71,
-    T38_TIMED_STEP_V8_CJ_SEND = 0x72,
-    T38_TIMED_STEP_V8_DONE = 0x73,
-    T38_TIMED_STEP_V34_DATA = 0x80
+    T38_TIMED_STEP_V8_WAIT_JM = 0x80,
+    T38_TIMED_STEP_V8_CJ_SEND = 0x90,
+    T38_TIMED_STEP_V34_DATA  = 0xA0
 };
 
 enum
@@ -285,6 +284,18 @@ static int process_rx_indicator(t38_core_state_t *t, void *user_data, int indica
         front_end_status(s, T30_FRONT_END_SIGNAL_PRESENT);
         break;
     case T38_IND_V21_PREAMBLE:
+        /* If V.8 was in progress, PSTN fax gave up and fell back to V.21 */
+        if (fe->v8_ansam_received  &&  fe->v8_state < V8_STATE_DONE)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW, "V.21 preamble detected, aborting V.8 (gateway may not support V.34 relay)\n");
+            fe->v8_state = V8_STATE_IDLE;
+            fe->v8_ansam_received = false;
+            fe->v34_active = false;
+            fe->v8_jm_received = false;
+            fe->v8_jm_len = 0;
+            fe->timed_step = T38_TIMED_STEP_NONE;
+        }
+        /*endif*/
         fe->timeout_rx_samples = fe->samples + milliseconds_to_samples(MID_RX_TIMEOUT);
         front_end_status(s, T30_FRONT_END_SIGNAL_PRESENT);
         break;
@@ -315,6 +326,10 @@ static int process_rx_indicator(t38_core_state_t *t, void *user_data, int indica
             fe->v8_ansam_received = true;
             fe->v8_state = V8_STATE_CM_SEND;
             fe->current_rx_type = T30_MODEM_V34HDX;
+            /* Start V.8 immediately: set next TX to now, override any current timed_step */
+            fe->timed_step = T38_TIMED_STEP_V8_CM_SEND;
+            fe->next_tx_samples = fe->samples;
+            fe->next_tx_indicator = T38_IND_NO_SIGNAL;
             front_end_status(s, T30_FRONT_END_SIGNAL_PRESENT);
         }
         /*endif*/
@@ -1215,6 +1230,22 @@ SPAN_DECLARE(int) t38_terminal_send_timeout(t38_terminal_state_t *s, int samples
 
     fe->samples += samples;
     t30_timer_update(&s->t30, samples);
+    /* If V.8/V.34 negotiation is in progress, ensure the timed_step
+       isn't overridden by the T.30 timer update (which may call set_tx_type).
+       But preserve the timing (don't reset next_tx_samples). */
+    if (fe->v8_ansam_received  &&  fe->v8_state > V8_STATE_IDLE  &&  fe->v8_state < V8_STATE_DONE)
+    {
+        int needed_step = (fe->v8_state == V8_STATE_CM_SEND)  ?  T38_TIMED_STEP_V8_CM_SEND
+                        : (fe->v8_state == V8_STATE_WAIT_JM)   ?  T38_TIMED_STEP_V8_WAIT_JM
+                        :                                          T38_TIMED_STEP_V8_CJ_SEND;
+        if (fe->timed_step != needed_step)
+        {
+            fe->timed_step = needed_step;
+            fe->next_tx_samples = fe->samples;
+        }
+        /*endif*/
+    }
+    /*endif*/
     if (fe->timeout_rx_samples  &&  fe->samples > fe->timeout_rx_samples)
     {
         span_log(&s->logging, SPAN_LOG_FLOW, "Timeout mid-receive\n");
@@ -1261,14 +1292,11 @@ SPAN_DECLARE(int) t38_terminal_send_timeout(t38_terminal_state_t *s, int samples
             span_log(&s->logging, SPAN_LOG_FLOW, "Sending V.8 CJ\n");
             t38_core_send_data(&fe->t38, T38_DATA_V8, T38_FIELD_CI_MESSAGE, NULL, 0, DATA_TX_COUNT);
             fe->next_tx_samples = fe->samples + milliseconds_to_samples(100);
-            fe->timed_step = T38_TIMED_STEP_V8_DONE;
+            span_log(&s->logging, SPAN_LOG_FLOW, "V.8 complete\n");
             fe->v8_state = V8_STATE_DONE;
+            fe->timed_step = T38_TIMED_STEP_NONE;
+            front_end_status(s, T30_FRONT_END_SEND_STEP_COMPLETE);
         }
-        break;
-    case T38_TIMED_STEP_V8_DONE:
-        /* V.8 complete, signal T.30 to continue */
-        fe->timed_step = T38_TIMED_STEP_NONE;
-        front_end_status(s, T30_FRONT_END_SEND_STEP_COMPLETE);
         break;
     case T38_TIMED_STEP_V34_DATA:
         /* V.34 primary channel data - redirect to HDLC streaming step */
@@ -1324,6 +1352,26 @@ static void set_rx_type(void *user_data, int type, int bit_rate, int short_train
     t38_terminal_state_t *s;
 
     s = (t38_terminal_state_t *) user_data;
+    if (s->t38_fe.v34_active)
+    {
+        /* In V.34 mode, all HDLC goes through V.34 control channel,
+           and all image data goes through V.34 primary channel */
+        if (type == T30_MODEM_V21)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW, "Set rx type V21 redirected to V34 CC\n");
+            s->t38_fe.current_rx_type = T30_MODEM_V34HDX;
+            return;
+        }
+        /*endif*/
+        if (type >= T30_MODEM_V27TER  &&  type <= T30_MODEM_V34HDX)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW, "Set rx type %d redirected to V34 PC\n", type);
+            s->t38_fe.current_rx_type = T30_MODEM_V34HDX;
+            return;
+        }
+        /*endif*/
+    }
+    /*endif*/
     span_log(&s->logging, SPAN_LOG_FLOW, "Set rx type %d\n", type);
     s->t38_fe.current_rx_type = type;
 }
@@ -1405,11 +1453,35 @@ static void set_tx_type(void *user_data, int type, int bit_rate, int short_train
         fe->current_tx_data_type = T38_DATA_NONE;
         break;
     case T30_MODEM_V21:
-        fe->next_tx_indicator = T38_IND_V21_PREAMBLE;
-        fe->current_tx_data_type = T38_DATA_V21;
+        if (fe->v34_active)
+        {
+            /* In V.34 mode, route V.21 HDLC through V.34 control channel */
+            fe->next_tx_indicator = T38_IND_V34_CNTL_CHANNEL_1200;
+            fe->current_tx_data_type = T38_DATA_V34_CC_1200;
+        }
+        else
+        {
+            fe->next_tx_indicator = T38_IND_V21_PREAMBLE;
+            fe->current_tx_data_type = T38_DATA_V21;
+        }
+        /*endif*/
         start_tx(fe, use_hdlc);
         break;
     case T30_MODEM_V27TER:
+        if (fe->v8_ansam_received
+            &&
+            (s->t30.supported_modems & T30_SUPPORT_V34HDX)
+            &&
+            (fe->v8_state == V8_STATE_DONE))
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW, "Redirect V.27ter to V.34\n");
+            fe->next_tx_indicator = T38_IND_V34_PRI_CHANNEL;
+            fe->current_tx_data_type = T38_DATA_V34_PRI_CH;
+            fe->timed_step = T38_TIMED_STEP_V34_DATA;
+            set_octets_per_data_packet(s, fe->v34_rate ? fe->v34_rate : 28800);
+            break;
+        }
+        /*endif*/
         switch (bit_rate)
         {
         case 2400:
@@ -1427,6 +1499,20 @@ static void set_tx_type(void *user_data, int type, int bit_rate, int short_train
         start_tx(fe, use_hdlc);
         break;
     case T30_MODEM_V29:
+        if (fe->v8_ansam_received
+            &&
+            (s->t30.supported_modems & T30_SUPPORT_V34HDX)
+            &&
+            (fe->v8_state == V8_STATE_DONE))
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW, "Redirect V.29 to V.34\n");
+            fe->next_tx_indicator = T38_IND_V34_PRI_CHANNEL;
+            fe->current_tx_data_type = T38_DATA_V34_PRI_CH;
+            fe->timed_step = T38_TIMED_STEP_V34_DATA;
+            set_octets_per_data_packet(s, fe->v34_rate ? fe->v34_rate : 28800);
+            break;
+        }
+        /*endif*/
         switch (bit_rate)
         {
         case 7200:
@@ -1447,18 +1533,18 @@ static void set_tx_type(void *user_data, int type, int bit_rate, int short_train
         if (fe->v8_ansam_received  &&  fe->v8_state == V8_STATE_DONE)
         {
             /* V.8 complete, now in V.34 mode. Use V.34 data instead of V.17 training. */
+            span_log(&s->logging, SPAN_LOG_FLOW, "Starting V.34 primary data\n");
             fe->next_tx_indicator = T38_IND_V34_PRI_CHANNEL;
             fe->current_tx_data_type = T38_DATA_V34_PRI_CH;
             fe->timed_step = T38_TIMED_STEP_V34_DATA;
         }
-        else if (fe->v8_ansam_received  &&  fe->v8_state < V8_STATE_DONE)
-        {
-            /* Don't start V.34 data yet. We are in V.8 negotiation. */
-            span_log(&s->logging, SPAN_LOG_FLOW, "Deferring V.34 start, V.8 in progress (state %d)\n", fe->v8_state);
-        }
         else
         {
-            span_log(&s->logging, SPAN_LOG_FLOW, "V.34 requested but V.8 not started\n");
+            /* V.8 not completed, redirect to V.17 fallback */
+            span_log(&s->logging, SPAN_LOG_FLOW, "V.34 not available, redirecting to V.17 14400\n");
+            fe->next_tx_indicator = (short_train)  ?  T38_IND_V17_14400_SHORT_TRAINING  :  T38_IND_V17_14400_LONG_TRAINING;
+            fe->current_tx_data_type = T38_DATA_V17_14400;
+            start_tx(fe, use_hdlc);
         }
         /*endif*/
         break;

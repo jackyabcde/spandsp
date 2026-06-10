@@ -2173,6 +2173,8 @@ static int analyze_rx_dis_dtc(t30_state_t *s, const uint8_t *msg, int len)
         if ((s->supported_modems & T30_SUPPORT_V17))
         {
             s->current_permitted_modems = T30_SUPPORT_V17 | T30_SUPPORT_V29 | T30_SUPPORT_V27TER;
+            if ((s->supported_modems & T30_SUPPORT_V34HDX))
+                s->current_permitted_modems |= T30_SUPPORT_V34HDX;
             s->current_fallback = T30_V17_FALLBACK_START;
             break;
         }
@@ -2182,6 +2184,8 @@ static int analyze_rx_dis_dtc(t30_state_t *s, const uint8_t *msg, int len)
         if ((s->supported_modems & T30_SUPPORT_V29))
         {
             s->current_permitted_modems = T30_SUPPORT_V29 | T30_SUPPORT_V27TER;
+            if ((s->supported_modems & T30_SUPPORT_V34HDX))
+                s->current_permitted_modems |= T30_SUPPORT_V34HDX;
             s->current_fallback = T30_V29_FALLBACK_START;
             break;
         }
@@ -2189,10 +2193,14 @@ static int analyze_rx_dis_dtc(t30_state_t *s, const uint8_t *msg, int len)
         /* Fall through */
     case DISBIT4:
         s->current_permitted_modems = T30_SUPPORT_V27TER;
+        if ((s->supported_modems & T30_SUPPORT_V34HDX))
+            s->current_permitted_modems |= T30_SUPPORT_V34HDX;
         s->current_fallback = T30_V27TER_FALLBACK_START;
         break;
     case 0:
         s->current_permitted_modems = T30_SUPPORT_V27TER;
+        if ((s->supported_modems & T30_SUPPORT_V34HDX))
+            s->current_permitted_modems |= T30_SUPPORT_V34HDX;
         s->current_fallback = T30_V27TER_FALLBACK_START + 1;
         break;
     case DISBIT3:
