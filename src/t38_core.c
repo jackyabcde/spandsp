@@ -533,8 +533,8 @@ SPAN_DECLARE(int) t38_core_rx_ifp_stream(t38_core_state_t *s, const uint8_t *buf
                 /*endif*/
                 if (t30_field_type > T38_FIELD_T4_NON_ECM_SIG_END)
                 {
-                    span_log(&s->logging, SPAN_LOG_FLOW, "Rx %5d: Unknown field type - %d (skipped)\n", log_seq_no, t30_field_type);
-                    continue;
+                    span_log(&s->logging, SPAN_LOG_FLOW, "Rx %5d: Unknown field type %d - dropping field\n", log_seq_no, t30_field_type);
+                    return -1;
                 }
                 /*endif*/
             }
@@ -550,8 +550,8 @@ SPAN_DECLARE(int) t38_core_rx_ifp_stream(t38_core_state_t *s, const uint8_t *buf
                     t30_field_type = T38_FIELD_CM_MESSAGE + (((buf[ptr] << 2) & 0x3C) | ((buf[ptr + 1] >> 6) & 0x3));
                     if (t30_field_type > T38_FIELD_V34RATE)
                     {
-                        span_log(&s->logging, SPAN_LOG_FLOW, "Rx %5d: Unknown field type - %d (skipped)\n", log_seq_no, t30_field_type);
-                        continue;
+                        span_log(&s->logging, SPAN_LOG_FLOW, "Rx %5d: Unknown field type %d - dropping field\n", log_seq_no, t30_field_type);
+                        return -1;
                     }
                     /*endif*/
                     ptr += 2;
