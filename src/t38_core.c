@@ -758,8 +758,16 @@ SPAN_DECLARE(int) t38_core_rx_ifp_packet(t38_core_state_t *s, const uint8_t *buf
     ptr = t38_core_rx_ifp_stream(s, buf, len, seq_no);
     if (ptr != len)
     {
-        if (ptr >= 0)
-            span_log(&s->logging, SPAN_LOG_PROTOCOL_WARNING, "Rx %5d: Invalid length for packet - %d %d\n", log_seq_no, ptr, len);
+        if (ptr >= 0  &&  ptr < len)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW, "Rx %5d: Partial IFP parse - processed %d of %d bytes\n", log_seq_no, ptr, len);
+            return 0;
+        }
+        /*endif*/
+        if (ptr < 0)
+            span_log(&s->logging, SPAN_LOG_PROTOCOL_WARNING, "Rx %5d: IFP parse error\n", log_seq_no);
+        else
+            span_log(&s->logging, SPAN_LOG_PROTOCOL_WARNING, "Rx %5d: IFP overrun - %d > %d\n", log_seq_no, ptr, len);
         /*endif*/
         return -1;
     }
