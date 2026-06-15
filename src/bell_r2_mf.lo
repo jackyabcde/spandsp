@@ -5,7 +5,7 @@
 # It is necessary for linking the library.
 
 # Name of the PIC object.
-pic_object=none
+pic_object='.libs/bell_r2_mf.o'
 
 # Name of the non-PIC object
 non_pic_object='bell_r2_mf.o'
